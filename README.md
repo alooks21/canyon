@@ -1,8 +1,11 @@
 # Canyon
 
 A canyon-road motorcycle game for the browser. Five stages plus an endless road, ghost races you
-can share with friends, live races for up to 4 riders (Race friends → send the room link), and a
-hold-to-wheelie button. Keyboard or gamepad. Built with three.js; no install, no account.
+can share with friends, live races for up to 4 riders (Race friends → send the room link), a
+hold-to-wheelie button, a cockpit camera, and Ride to my music (share a Chrome tab that's playing
+music; the road, sky and pace follow its tempo and brightness — the sound is analysed live in your
+browser and never recorded, stored or sent). Keyboard or gamepad. Built with three.js; no install,
+no account. Work in progress.
 
 **Play:** https://alooks21.github.io/canyon/#canyon (Google Chrome)
 

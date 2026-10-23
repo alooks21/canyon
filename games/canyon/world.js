@@ -572,6 +572,7 @@ export function createWorld(scene, renderer, course, opts = {}) {
   sun.shadow.camera.left = -9; sun.shadow.camera.right = 9;
   sun.shadow.camera.top = 9; sun.shadow.camera.bottom = -9;
   sun.shadow.camera.near = 1; sun.shadow.camera.far = 120;
+  sun.shadow.camera.layers.enable(1);                // bike-model.js SHADOW_LAYER: the cockpit view's shadow-only rider
   sun.shadow.bias = -0.0004;
   sun.shadow.normalBias = 0.02;
   scene.add(sun);
@@ -635,6 +636,7 @@ export function createWorld(scene, renderer, course, opts = {}) {
   envScene.add(envSky);
   const grey = (c, k) => { const l = (0.2126 * c.r + 0.7152 * c.g + 0.0722 * c.b) * k; return cB.setRGB(l, l, l); };
   const SODIUM = new THREE.Color(0xffb36b), SODIUM_LOW = new THREE.Color(0x2e241a), TUNNEL_HAZE = new THREE.Color(0x4a3f33);
+  const lit = { sun: 0, hemi: 0, sign: 0, glow: 0 };   // what setEnvironment set, for music()
 
   // mods (Endless): { rain, fog, overcast } weather 0..1, tunnel (how far inside one,
   // 0..1) and seaY (the region's sea level, or null).
@@ -702,6 +704,7 @@ export function createWorld(scene, renderer, course, opts = {}) {
     tubeMat.color.setScalar(night > 0.5 ? 0.78 : 1);
     glareMat.opacity = 0.6 * tk * (1 - night) * (1 - 0.4 * oc);
     rainUniforms.uColor.value.setHex(0xa9b6c4).multiplyScalar(0.3 + 0.7 * (1 - night));
+    lit.sun = sun.intensity; lit.hemi = hemi.intensity; lit.sign = signMat.emissiveIntensity; lit.glow = glowMat.emissiveIntensity;
 
     // Far ridges: fog-coloured at the foot, a hazier shade of the sky at the crest.
     const col = ridgeGeo.attributes.color;
@@ -1505,9 +1508,17 @@ export function createWorld(scene, renderer, course, opts = {}) {
     course.releaseTiles(cx, cz, R + TILE * 2.2);
     if (propsDirty && time - lastProps > 0.25) { const t0 = performance.now(); rebuildProps(); lastProps = time; timed('props', t0); }
 
-    // Environment follows the road in Endless; for stages it's set once.
-    if (course.endless) setEnvironment(course.todAt(f.s), course.biomeAt(f.s), modsAt(f.s));
+    // Environment follows the road in Endless; for stages it's set once. A music ride's
+    // sky (time of day + weather) follows the scene now instead (setSky()); tunnels still count.
+    if (course.endless) {
+      const m = modsAt(f.s);
+      if (skyOver) { m.rain = skyOver.weather.rain; m.fog = skyOver.weather.fog; m.overcast = skyOver.weather.overcast; }
+      setEnvironment(skyOver ? skyOver.tod : course.todAt(f.s), course.biomeAt(f.s), m);
+    }
   }
+  // { tod: { a, b, t }, weather: { rain, fog, overcast } } to drive the sky, or null for the road's.
+  let skyOver = null;
+  function setSky(o) { skyOver = o; }
 
   const mods = { rain: 0, fog: 0, overcast: 0, tunnel: 0, seaY: null };
   function modsAt(s) {
@@ -1529,6 +1540,18 @@ export function createWorld(scene, renderer, course, opts = {}) {
     rainUniforms.uAmount.value = env.rain;
     rainUniforms.uTime.value = time;
     rainUniforms.uCam.value.copy(camera.position);
+  }
+
+  // Ride to my music, every frame: beat is the pulse after each beat (0..1), light a
+  // multiplier from the loudness. Signs and reflector posts, street lamps and windows,
+  // and tunnel lamps flash on the beat. Only existing lights and materials change —
+  // no new draw calls. music(0, 1) puts it all back.
+  function music(beat, light) {
+    sun.intensity = lit.sun * light;
+    hemi.intensity = lit.hemi * light;
+    signMat.emissiveIntensity = lit.sign + 0.8 * beat;
+    glowMat.emissiveIntensity = lit.glow + 1.4 * beat;
+    lampMat.color.setHex(0xffe2b0).multiplyScalar(1 + 0.9 * beat);
   }
 
   // Shadows: a small box of shadow-map that follows the bike.
@@ -1561,7 +1584,7 @@ export function createWorld(scene, renderer, course, opts = {}) {
   setEnvironment(course.todAt(course.startS), course.biomeAt(course.startS), course.endless ? modsAt(course.startS) : null);
 
   return {
-    update, follow, prewarm, shadowAt, setQuality, roadPoint,
+    update, follow, prewarm, shadowAt, setQuality, roadPoint, music, setSky,
     get env() { return env; },
     get sunDir() { return sunDir; },
     get sunLight() { return sun; },

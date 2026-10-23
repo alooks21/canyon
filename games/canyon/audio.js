@@ -34,7 +34,7 @@ export async function createAudio() {
   const tyre = bed('bandpass', 1150, 7);
   const gravel = bed('lowpass', 520, 0.9);
   const scrape = bed('bandpass', 3200, 2.5);
-  const rainBed = bed('highpass', 2400, 0.5);
+  const rainBed = bed('bandpass', 900, 0.35);   // soft, low patter (was a 2.4 kHz highpass hiss)
 
   // Tunnels: the engine bounces off the walls — a short, dark feedback echo.
   const echoSend = ctx.createGain(), echo = ctx.createDelay(0.5), echoFb = ctx.createGain(), echoTone = ctx.createBiquadFilter();
@@ -56,6 +56,7 @@ export async function createAudio() {
   } catch { engine = null; }
 
   const set = (param, v, tc = 0.05) => param.setTargetAtTime(v, ctx.currentTime, tc);
+  let duck = 1;                    // Ride to my music: engine and wind under the player's own music
 
   // One-shot tone with a short envelope.
   function tone(freq, dur, type = 'sine', vol = 0.25, when = 0) {
@@ -84,6 +85,9 @@ export async function createAudio() {
   return {
     get ready() { return !!engine; },
     get state() { return ctx.state; },
+    // The context itself, for the music analysis (music.js), which listens on it.
+    get context() { return ctx; },
+    setDuck(k) { duck = k; },
     resume() { if (ctx.state === 'suspended') ctx.resume(); },
     suspend() { if (ctx.state === 'running') ctx.suspend(); },
     setVolume(v) { set(master.gain, 0.6 * v, 0.1); },
@@ -93,18 +97,18 @@ export async function createAudio() {
         engine.parameters.get('rpm').value = a.rpm;
         engine.parameters.get('load').value = a.load;
         engine.parameters.get('cut').value = a.cut ? 1 : 0;
-        set(engGain.gain, a.crashed ? 0.08 : 0.55, 0.15);
+        set(engGain.gain, (a.crashed ? 0.08 : 0.55) * duck, 0.15);
       }
       const v = a.v;
       // wind stays under the engine: ~0.03 at 100 km/h, 0.15 max (was 0.45/0.5, which hissed over it)
-      set(wind.g.gain, Math.min(0.15, (v / 60) ** 2 * 0.14));
+      set(wind.g.gain, Math.min(0.15, (v / 60) ** 2 * 0.14) * duck);
       set(wind.f.frequency, 250 + v * 9);           // lower band = a rush, not static
       const squeal = !a.airborne && a.surface !== 'gravel' && a.surface !== 'dirt' ? Math.max(0, (a.usage - 0.86) / 0.14) : 0;
       set(tyre.g.gain, Math.min(0.22, squeal * 0.22 * Math.min(1, v / 10)), 0.03);
       const rough = (a.surface === 'gravel' || a.surface === 'dirt') && !a.airborne ? Math.min(0.5, v / 25) : 0;
       set(gravel.g.gain, rough * 0.45, 0.04);
       set(scrape.g.gain, a.scrape ? 0.3 : 0, 0.03);
-      set(rainBed.g.gain, (a.rain || 0) * 0.16, 0.4);
+      set(rainBed.g.gain, (a.rain || 0) * 0.05, 0.8);   // a background bed: ~1/3 of before, eased in slower
       set(echoSend.gain, (a.tunnel || 0) * 0.85, 0.25);
     },
     chime(kind) {

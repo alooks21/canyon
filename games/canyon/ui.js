@@ -146,6 +146,20 @@ const CSS = `
 .cy table.board td{padding:.35cqw .6cqw;border-bottom:1px solid rgba(255,255,255,.06)}
 .cy table.board td.n{text-align:right;width:1%;white-space:nowrap}
 .cy .rmine{font-size:1.5cqw;font-weight:700;margin:.3cqw 0 .6cqw}
+/* ride to my music */
+.cy .mchip{position:absolute;left:50%;top:1.8cqw;transform:translateX(-50%);display:none;align-items:center;gap:.9cqw;padding:.4cqw .5cqw .4cqw 1.2cqw;border-radius:2cqw;background:rgba(8,9,12,.72);border:1px solid rgba(255,255,255,.12);font-size:1.3cqw;font-weight:800;letter-spacing:.06em;text-transform:uppercase;white-space:nowrap}
+.cy .mchip.on{display:flex}
+.cy .mchip .mv{color:var(--vibe,#fff)}
+.cy .mchip .mb{color:#c6cad1;font-variant-numeric:tabular-nums}
+.cy .mchip .btn{width:auto;padding:.25cqw .8cqw;font-size:1.05cqw;text-transform:none}
+.cy .cchip{position:absolute;left:50%;top:5.4cqw;transform:translateX(-50%);display:none;align-items:center;gap:.9cqw;padding:.3cqw .5cqw .3cqw 1.1cqw;border-radius:2cqw;background:rgba(8,9,12,.72);border:1px solid rgba(255,216,74,.35);font-size:1.1cqw;font-weight:700;color:#ffd84a;white-space:nowrap;font-variant-numeric:tabular-nums}
+.cy .cchip.on{display:flex}
+.cy .cchip .btn{width:auto;padding:.25cqw .8cqw;font-size:1.05cqw;text-transform:none}
+.cy .hud.music .dash{box-shadow:0 0 calc(var(--beat,0) * 2.4cqw) rgba(255,59,69,calc(var(--beat,0) * .7))}
+.cy .hud.music .spd{text-shadow:0 0 calc(var(--beat,0) * 1.6cqw) rgba(255,110,110,var(--beat,0))}
+.cy .mrange{grid-column:1/-1;cursor:default}
+.cy .mrange input{pointer-events:auto;margin-left:auto;width:40%;accent-color:#d0202a}
+.cy .mrange output{min-width:3.5cqw;text-align:right;color:#9aa0aa;font-size:1.25cqw}
 `;
 
 const esc = s => String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -171,11 +185,13 @@ export function createUI(mount, actions) {
       <div class="menu">
         <button class="btn" data-a="stages">Ride a stage <small>5 roads</small></button>
         <button class="btn" data-a="endless">Endless ride <small>no finish line</small></button>
+        <button class="btn" data-a="music">Ride to my music <small>Endless, to a tab's sound</small></button>
         <button class="btn" data-a="race">Race friends <small>live, up to 4</small></button>
         <button class="btn" data-a="ghosts">Friends' ghosts <small>share and race runs</small></button>
         <button class="btn" data-a="demo">Watch a demo lap <small>autopilot</small></button>
         <button class="btn" data-a="settings">Settings</button>
         <button class="btn" data-a="help">How to ride</button>
+        <button class="btn" data-a="calibLast" hidden>Download last calibration</button>
       </div>
     </div>
     <div class="spec panel">
@@ -193,6 +209,17 @@ export function createUI(mount, actions) {
       <div class="src"><span class="tag grey">GAME VALUES</span> gear ratios, redline ${TUNED.limiterRpm.toLocaleString()} rpm, centre of mass, tyre sizes and grip are tuned, not published by the manufacturer.</div>
     </div>
     <div class="hint">↑/↓ or Tab to choose · Enter to select · gamepad works too</div>
+  </div>
+
+  <div class="scr" data-s="music">
+    <div class="sheet panel" style="width:58cqw">
+      <h2>Ride to my music</h2>
+      <div class="sub">Play music in another Chrome tab (Spotify, YouTube…), then share that tab's sound.
+        The road follows it: tempo and brightness pick the scene (night, sunset, midday or storm), the tempo bends the road, and the lights pulse on the beat.
+        Canyon only listens. It works out a few numbers live and keeps no audio; the music plays on in its own tab.</div>
+      <div class="gmsg" id="cyMusicMsg" aria-live="polite"></div>
+      <div class="row"><button class="btn" data-a="music">Choose the tab again</button><button class="btn" data-a="back">Back</button></div>
+    </div>
   </div>
 
   <div class="scr" data-s="stages">
@@ -277,6 +304,9 @@ export function createUI(mount, actions) {
         <span>Respawn</span><span><kbd>R</kbd></span><span class="dim">Back</span>
         <span>Pause</span><span><kbd>Esc</kbd> <kbd>P</kbd></span><span class="dim">Start</span>
         <span>Fullscreen</span><span><kbd>F</kbd></span><span class="dim"></span>
+        <span>Ride to my music: sky (time of day) — night · sunset · midday · storm</span><span><kbd>1</kbd> <kbd>2</kbd> <kbd>3</kbd> <kbd>4</kbd></span><span class="dim"></span>
+        <span>Ride to my music: back to automatic (scene and sky follow the music)</span><span><kbd>5</kbd></span><span class="dim"></span>
+        <span>Ride to my music: new scene now (the sky follows the music again)</span><span><kbd>N</kbd></span><span class="dim"></span>
       </div>
       <div class="tips">
         <b>Bikes turn by leaning.</b> Lean is grip: the tyres can only give about 1.1 g in total, shared between
@@ -299,6 +329,8 @@ export function createUI(mount, actions) {
         <button class="btn" data-a="resume">Resume</button>
         <button class="btn" data-a="restart">Restart</button>
         <button class="btn" data-a="settings">Settings</button>
+        <button class="btn" data-a="musicStop" hidden>Stop the music</button>
+        <button class="btn" data-a="calibSave" hidden>Download calibration</button>
         <button class="btn" data-a="quit">Back to the garage</button>
       </div>
     </div>
@@ -334,6 +366,8 @@ export function createUI(mount, actions) {
       </div>
     </div>
     <canvas class="map" width="240" height="240"></canvas>
+    <div class="mchip"><span class="mv"></span><span class="mb"></span><button class="btn" data-a="musicStop">Stop music</button></div>
+    <div class="cchip"><span class="cl"></span><button class="btn" data-a="calibSave">Download calibration</button></div>
     <div class="msgs"></div>
   </div>
   <div class="count"></div>
@@ -364,6 +398,13 @@ export function createUI(mount, actions) {
     if (e.key === 'Enter' && e.target.id === 'cyCode') { e.preventDefault(); actions.raceJoin?.(); }
   }
   root.addEventListener('keydown', onKey);
+  // The music-mode engine slider (the only range input).
+  function onInput(e) {
+    if (e.target.id !== 'cyMusicEngine') return;
+    e.target.nextElementSibling.textContent = `${Math.round(e.target.value * 100)}%`;
+    actions.musicEngine?.(e.target.value);
+  }
+  root.addEventListener('input', onInput);
   // A chosen file goes through the same import as a pasted code.
   const fileIn = $('#cyGhostFile'), nameIn = $('#cyGhostName');
   function onFile() {
@@ -443,6 +484,7 @@ export function createUI(mount, actions) {
     ['ghost', 'Ghost of best run', [['on', 'On'], ['off', 'Off']]],
     ['quality', 'Graphics', [['high', 'High'], ['low', 'Low (faster)']]],
     ['volume', 'Sound', [['1', 'Loud'], ['0.6', 'Normal'], ['0.3', 'Quiet'], ['0', 'Off']]],
+    ['musicKick', 'Camera kick on strong beats (music)', [['on', 'On'], ['off', 'Off']]],
   ];
   function renderSettings(s) {
     const AID_NOTE = { full: 'ATC · AWC · ABS · lean assist', sport: 'ATC · AWC · ABS, no lean assist', off: 'nothing — it’s all you' };
@@ -450,7 +492,8 @@ export function createUI(mount, actions) {
       const i = Math.max(0, opts.findIndex(o => o[0] === String(s[k])));
       const note = k === 'aids' ? AID_NOTE[s[k]] : '';
       return `<button class="btn" data-a="cycle" data-arg="${k}">${esc(label)} <small>${esc(opts[i][1])}${note ? ' — ' + esc(note) : ''}</small></button>`;
-    }).join('');
+    }).join('') + `<label class="btn mrange">Engine volume (music mode)
+      <input type="range" id="cyMusicEngine" min="0" max="1" step="0.05" value="${esc(s.musicEngine)}"><output>${Math.round(s.musicEngine * 100)}%</output></label>`;
   }
   function nextSetting(k, s) {
     const opts = SETTINGS.find(x => x[0] === k)[2];
@@ -527,6 +570,39 @@ export function createUI(mount, actions) {
       <div class="dim" style="font-size:1.2cqw;margin-top:.6cqw">${b.over ? 'Race over.' : b.closeIn != null ? `The race closes in ${Math.ceil(b.closeIn)} s; anyone still riding then is DNF.` : 'Waiting for the others to finish.'}</div>`;
   }
   // Online, a ride can't be restarted, and quitting goes back to the room's lobby.
+  // ---------- ride to my music ----------
+  function musicMsg(text, cls = '') {
+    const node = $('#cyMusicMsg');
+    node.textContent = text;
+    node.className = 'gmsg ' + cls;
+  }
+  function musicMode(on) {
+    $('[data-s=pause] [data-a=musicStop]').hidden = !on;
+    hud.classList.toggle('music', on);
+    el.mchip.classList.toggle('on', on);
+    if (!on) { last.beat = null; hud.style.removeProperty('--beat'); }
+  }
+  const VIBE_COLOR = { sad: '#8fb0ff', chill: '#ffb36b', upbeat: '#ffd84a', intense: '#ff4a52' };
+  // m: { vibe, scene, override, bpm, listening, paused } — "Night · 98 BPM"
+  function musicHud(m) {
+    const v = m.paused ? 'Music paused' : `${m.scene || m.vibe}${m.override ? ' (yours)' : ''}`;
+    const b = m.paused ? '· scenery holds' : m.listening ? '· listening…' : `· ${Math.round(m.bpm)} BPM`;
+    set('mv', el.mv, v);
+    set('mb', el.mb, b);
+    const c = m.paused ? '#c6cad1' : VIBE_COLOR[m.vibe];
+    if (last.mc !== c) { last.mc = c; el.mchip.style.setProperty('--vibe', c); }
+  }
+  // ?calibrate=1: the recorder's chip, and its download buttons.
+  function calibMode(on) {
+    el.cchip.classList.toggle('on', on);
+    $('[data-s=pause] [data-a=calibSave]').hidden = !on;
+  }
+  function calibLast(on) { $('[data-a=calibLast]').hidden = !on; }
+  function beat(p) {
+    const q = Math.round(p * 20) / 20;
+    if (last.beat !== q) { last.beat = q; hud.style.setProperty('--beat', q); }
+  }
+
   function onlineMode(on) {
     const rs = $('[data-s=pause] [data-a=restart]');
     rs.hidden = rs.disabled = on;
@@ -543,6 +619,8 @@ export function createUI(mount, actions) {
     needle: $('.needle'), arcL: $('.arcL'), arcR: $('.arcR'), lv: $('.lv'), lmax: $('.lmax'),
     aids: { atc: $('[data-k=atc]'), awc: $('[data-k=awc]'), abs: $('[data-k=abs]') },
     map: $('.map'), msgs: $('.msgs'), count: $('.count'), loading: $('.loading'),
+    mchip: $('.mchip'), mv: $('.mchip .mv'), mb: $('.mchip .mb'),
+    cchip: $('.cchip'), cl: $('.cchip .cl'),
   };
   const mapCtx = el.map.getContext('2d');
   const last = {};
@@ -661,17 +739,19 @@ export function createUI(mount, actions) {
     get screen() { return current; },
     renderStages, renderSettings, nextSetting, renderGhosts, ghostMsg,
     get ghostInput() { return $('#cyGhostIn'); },
-    renderRace, raceMsg, renderBoard, onlineMode,
+    renderRace, raceMsg, renderBoard, onlineMode, musicMsg, musicMode, calibMode, calibLast,
     get codeInput() { return codeIn; },
     hud: {
       show(on) { hud.classList.toggle('on', on); },
-      update: updateHud, split, drawMap,
+      update: updateHud, split, drawMap, music: musicHud, beat,
+      calib: text => set('cl', el.cl, text),
     },
     message, countdown, results,
     loading(on) { el.loading.classList.toggle('on', on); },
     destroy() {
       root.removeEventListener('click', onClick);
       root.removeEventListener('keydown', onKey);
+      root.removeEventListener('input', onInput);
       fileIn.removeEventListener('change', onFile);
       nameIn.removeEventListener('change', onName);
       nickIn.removeEventListener('change', onNick);

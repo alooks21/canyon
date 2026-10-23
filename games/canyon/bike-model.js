@@ -29,6 +29,7 @@ const RAKE = Math.atan2(FA - HEAD.x, HEAD.y - FR);   // ≈ 24.5°
 const FORK_LEN = Math.hypot(FA - HEAD.x, HEAD.y - FR);
 const PIVOT = new THREE.Vector3(-0.17, 0.48, 0);     // swingarm pivot
 const GHOST_GRID = 0.02;                             // ghost decimation grid (m), see cluster()
+const SHADOW_LAYER = 1;                              // seen only by world.js's sun shadow camera, see cockpit()
 
 const C = {
   black: 0x0e0f12, black2: 0x1a1b1f, red: 0xd0202a, silver: 0xa7abb2, grey: 0x3a3c42,
@@ -502,6 +503,51 @@ export function createBikeModel() {
   add(merge(metalParts), metal);
   add(merge(matteParts), matte);
 
+  // ---------- dash: a small TFT (speed, gear, rev bar) behind the screen ----------
+  // Frame-mounted on both bikes (the R1M's and the RS 660's dash sit on the fairing stay, not
+  // the bars), so it hangs from `lean`. A 256×128 canvas, redrawn only when a shown value
+  // changes and at most DASH_HZ times a second (dash()); never per frame.
+  const DASH_HZ = 12, DASH_SEGS = 24;
+  const dashCv = document.createElement('canvas');
+  dashCv.width = 256; dashCv.height = 128;
+  const dashG = dashCv.getContext('2d');
+  const dashTex = own(new THREE.CanvasTexture(dashCv));
+  dashTex.colorSpace = THREE.SRGBColorSpace;
+  dashTex.anisotropy = 4;
+  const dashMesh = add(new THREE.PlaneGeometry(0.12, 0.06), own(new THREE.MeshBasicMaterial({ map: dashTex })), lean, false);
+  const dashShown = { speed: -1, mph: null, gear: -1, seg: -1 };
+  let dashT = 1;
+  // Where it sits (model space, metres) and how far its face tips back from facing the rider.
+  function placeDash(x, y, tilt) {
+    dashMesh.position.set(x, y, 0);
+    dashMesh.rotation.set(0, -Math.PI / 2, 0);            // face (+z) to the rider (−x)
+    dashMesh.rotateX(-tilt);                               // … and tipped back, up toward the eyes
+  }
+  placeDash(0.46, 0.93, 0.9);                              // RS 660: just behind the screen's base
+  function drawDash(speed, mph, gear, seg) {
+    const g = dashG;
+    g.fillStyle = '#05070a'; g.fillRect(0, 0, 256, 128);
+    for (let i = 0; i < DASH_SEGS; i++) {
+      g.fillStyle = i >= seg ? '#1b2129' : i >= DASH_SEGS - 4 ? '#ff3b30' : '#e8eef5';
+      g.fillRect(10 + i * 9.9, 10, 7.5, 16);
+    }
+    g.textAlign = 'right';
+    g.fillStyle = '#ffffff';
+    g.font = '700 68px Arial, sans-serif';
+    g.fillText(String(speed), 166, 100);
+    g.fillStyle = '#8fa0b3';
+    g.font = '600 17px Arial, sans-serif';
+    g.fillText(mph ? 'MPH' : 'KM/H', 166, 120);
+    g.strokeStyle = '#3a4553'; g.lineWidth = 3;
+    g.strokeRect(182, 38, 64, 82);
+    g.textAlign = 'center';
+    g.fillStyle = '#ff3b30';
+    g.font = '700 60px Arial, sans-serif';
+    g.fillText(gear ? String(gear) : 'N', 214, 104);
+    dashTex.needsUpdate = true;
+  }
+  drawDash(0, false, 0, 0);
+
   // ---------- front end: steering pivot about the raked axis ----------
   const steerPivot = new THREE.Group();
   steerPivot.position.copy(HEAD);
@@ -891,7 +937,7 @@ export function createBikeModel() {
   function useBike(asset) {
     if (r1m || !asset) return false;
     const old = [];
-    (function walk(o) { for (const c of o.children) if (c !== rider) { if (c.isMesh) old.push(c); walk(c); } })(lean);
+    (function walk(o) { for (const c of o.children) if (c !== rider && c !== dashMesh) { if (c.isMesh) old.push(c); walk(c); } })(lean);
     for (const m of old) { m.removeFromParent(); m.geometry.dispose(); }
     const P = asset.pivots, A = asset.anchors;
     rig.rake = Math.atan2(P.frontSpin.x - P.steer.x, P.steer.y - P.frontSpin.y);
@@ -915,6 +961,7 @@ export function createBikeModel() {
         if (n === 'steer') m.rotation.z = -rig.rake;      // the file's frames are the bike's axes; steer's group is raked
       }
     }
+    placeDash(0.47, 0.95, 0.9);                            // R1M: TFT behind the screen, above the top clamp
     r1m = true;
     if (!detached) poseRider(1, 0, false);
     return true;
@@ -943,7 +990,14 @@ export function createBikeModel() {
       return { up: B(up + s, d0, h), lo: B(lo + s, e.clone().sub(m), h), h, len1: a.distanceTo(m), len2: m.distanceTo(e) };
     };
     const pel = P('pelvis'), torso = P('neck_01').sub(pel), sh = P('upperarm_l').sub(pel), pp = bone('pelvis').parent;
-    skin = { mesh, head: bone('Head') };
+    skin = { mesh, head: bone('Head'), fullGeo: mesh.geometry, cutGeo: torsoSplit(mesh) };
+    skin.shadow = new THREE.SkinnedMesh(mesh.geometry, leather);   // the cockpit view's full-body shadow
+    skin.shadow.bind(mesh.skeleton, mesh.bindMatrix);
+    skin.shadow.castShadow = true;
+    skin.shadow.frustumCulled = false;
+    skin.shadow.layers.set(SHADOW_LAYER);
+    skin.shadow.visible = false;
+    mesh.add(skin.shadow);
     skin.headB = B('Head', torso, LEFT);
     skin.pelvis = B('pelvis', torso, LEFT);
     skin.spine = B('spine_01', torso, LEFT);
@@ -962,6 +1016,7 @@ export function createBikeModel() {
     skin.head.add(riderParts.helmet);
     riderParts.helmet.position.copy(HELM);
     riderParts.helmet.rotation.set(0, -Math.PI / 2, 0);    // visor (+x) to the face (the bone's +z)
+    if (cockpitOn) { cockpitOn = false; cockpit(true); }   // loaded while in the cockpit view
     poseRider(1, 0, false);
   }
 
@@ -986,6 +1041,35 @@ export function createBikeModel() {
       c.setHex(hex).toArray(col, i * 3);
     }
     g.setAttribute('color', new THREE.BufferAttribute(col, 3));
+  }
+
+  // The cockpit view's body (see cockpit()): the index re-sorted so that triangles with two or
+  // more corners moved mostly by the head, neck, spine, pelvis, a clavicle or an upper arm come
+  // last (the upper arms too: their cut shoulders sat right under the camera), and a
+  // geometry on the same buffers that draws only the ones before them. Once per page.
+  const TORSO = /^(Head|neck|spine|pelvis|clavicle|upperarm)/;
+  function torsoSplit(mesh) {
+    const g = mesh.geometry;
+    if (g.userData.cockpit) return g.userData.cockpit;
+    const si = g.attributes.skinIndex, sw = g.attributes.skinWeight, idx = g.index.array, n = si.count, t = idx.length / 3;
+    const hide = new Uint8Array(n), keep = [], cut = [];
+    for (let i = 0; i < n; i++) {
+      let k = 0;
+      for (let j = 1; j < 4; j++) if (sw.getComponent(i, j) > sw.getComponent(i, k)) k = j;
+      hide[i] = TORSO.test(mesh.skeleton.bones[si.getComponent(i, k)].name) ? 1 : 0;
+    }
+    for (let f = 0; f < t; f++) {
+      const a = idx[f * 3], b = idx[f * 3 + 1], c = idx[f * 3 + 2];
+      (hide[a] + hide[b] + hide[c] >= 2 ? cut : keep).push(a, b, c);
+    }
+    idx.set(keep); idx.set(cut, keep.length);
+    g.index.needsUpdate = true;
+    const out = new THREE.BufferGeometry();
+    for (const k in g.attributes) out.setAttribute(k, g.attributes[k]);
+    out.setIndex(g.index);
+    out.setDrawRange(0, keep.length);
+    g.userData.cockpit = out;
+    return out;
   }
 
   // On the bike: the code rider's lean-in, hang-off and tuck, mapped onto the body.
@@ -1070,6 +1154,47 @@ export function createBikeModel() {
     tail.color.setHex(opts.braking ? 0xff1a22 : 0x8a0d12);
     // Always present (toggling a light's visibility recompiles every shader).
     beam.intensity = opts.night ? 180 : 0;
+    dashT += dt;
+  }
+
+  // The dash's readout: speed (already in the player's units), mph?, gear (0 = N), rpm.
+  // Redrawn only when what it shows changes, and at most DASH_HZ times a second.
+  function dash(speed, mph, gear, rpm) {
+    if (dashT < 1 / DASH_HZ) return;
+    const sp = Math.round(speed), seg = Math.round(Math.max(0, Math.min(1, rpm / TUNED.limiterRpm)) * DASH_SEGS);
+    const S = dashShown;
+    if (sp === S.speed && mph === S.mph && gear === S.gear && seg === S.seg) return;
+    S.speed = sp; S.mph = mph; S.gear = gear; S.seg = seg;
+    dashT = 0;
+    drawDash(sp, mph, gear, seg);
+  }
+
+  // Cockpit camera: the eyes (`eye`, in the helmet's frame: +x the visor, +y up, from its
+  // centre), moved by `back` in the bike's frame (+x forward, +y up; leaned with the bike, but
+  // not turned by the head's own nod), in world space.
+  const qLean = new THREE.Quaternion(), vBack = new THREE.Vector3();
+  function eyeWorld(out, eye, back) {
+    const h = riderParts.helmet;
+    h.updateWorldMatrix(true, false);
+    out.copy(eye).applyMatrix4(h.matrixWorld);
+    return out.add(vBack.copy(back).applyQuaternion(lean.getWorldQuaternion(qLean)));
+  }
+
+  // Cockpit view: no head, torso or upper arms in the way (the camera sits where they
+  // are); forearms and gloves stay. The skinned body is one mesh, so its triangles are sorted
+  // once per page (torsoSplit), those parts last, and in this view the mesh draws a copy of its
+  // geometry (same buffers) that stops before them. Its own shadow would lose them too, so a full-body twin on
+  // SHADOW_LAYER, which only the sun's shadow camera sees, casts the shadow instead.
+  let cockpitOn = false;
+  function cockpit(on) {
+    if (on === cockpitOn) return;
+    cockpitOn = on;
+    riderParts.helmet.visible = !on;
+    if (riderParts.torso) riderParts.torso.visible = !on;   // the code-built rider
+    if (!skin) return;
+    skin.mesh.geometry = on ? skin.cutGeo : skin.fullGeo;
+    skin.mesh.castShadow = !on;
+    skin.shadow.visible = on;
   }
 
   // The ghost's bike is decimated by vertex clustering: snap to a GHOST_GRID grid and drop
@@ -1101,7 +1226,7 @@ export function createBikeModel() {
     const inv = new THREE.Matrix4().copy(root.matrixWorld).invert();
     const geos = [];
     root.traverse(o => {
-      if (!o.isMesh || o.material === decalR || o.material === decalL) return;
+      if (!o.isMesh || o === dashMesh || o === skin?.shadow || o.material === decalR || o.material === decalL) return;
       let g;
       if (o.isSkinnedMesh) {                              // the body as posed, skinned on the CPU
         const idx = o.geometry.index, n = idx ? idx.count : o.geometry.attributes.position.count, p = new Float32Array(n * 3);
@@ -1147,12 +1272,12 @@ export function createBikeModel() {
     group: root, update, idle, bakeGhost, rider, lean, sliderWorld,
     riderWorld, detach, ragdoll, attach,
     get detached() { return detached; },
-    riderHelmet: riderParts.helmet,
+    riderHelmet: riderParts.helmet, eyeWorld, cockpit, dash,
     useRider, useBody, useBike,
     // ?test=1: which bike is drawn, and its triangles and meshes (without the rider).
     bikeInfo() {
       let tris = 0, meshes = 0;
-      (function walk(o) { for (const c of o.children) if (c !== rider) { if (c.isMesh) { meshes++; tris += (c.geometry.index ? c.geometry.index.count : c.geometry.attributes.position.count) / 3; } walk(c); } })(lean);
+      (function walk(o) { for (const c of o.children) if (c !== rider && c !== dashMesh) { if (c.isMesh) { meshes++; tris += (c.geometry.index ? c.geometry.index.count : c.geometry.attributes.position.count) / 3; } walk(c); } })(lean);
       lean.updateMatrixWorld(true);
       const inv = new THREE.Matrix4().copy(lean.matrixWorld).invert(), g = o => o.getWorldPosition(new THREE.Vector3()).applyMatrix4(inv).toArray().map(v => +v.toFixed(4));
       const bn = n => skin && g(skin.mesh.skeleton.getBoneByName(n));      // the body's wrists and balls of the feet

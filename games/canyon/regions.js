@@ -13,6 +13,11 @@
 //
 // Pure (no three.js). Regions are created as the road grows, from one seeded stream
 // in a fixed order, so the same seed always gives the same ride.
+//
+// Ride to my music adds a director: a function that says what the music wants (a
+// vibe and a tempo). With one, each new region is that vibe's recipe (VIBE_PARTS,
+// including its own time of day), its road bent by the tempo, and a new song cuts
+// the stream with a region-changing tunnel (songCut).
 
 import { BIOMES } from './stages.js';
 import { mulberry32, hash2 } from './road.js';
@@ -37,6 +42,19 @@ const TOWN_A = ['Pine', 'Dry', 'Cedar', 'Coyote', 'Granite', 'Willow', 'Rattlesn
 const TOWN_B = ['Hollow', 'Wells', 'Flat', 'Springs', 'Gulch', 'Junction', 'Creek', 'Ridge', 'Crossing', 'Bend', 'Gap', 'Station', 'Falls', 'Mill'];
 const CLEAR = { rain: 0, fog: 0, overcast: 0 };
 
+// Ride to my music: each vibe is a recipe of the parts above — land (by biome), road
+// style, look, time of day and weather — with a little choice inside it.
+const RAIN = { rain: 1, fog: 0.15, overcast: 1 }, MIST = { rain: 0, fog: 0.75, overcast: 0.6 };
+const STORM = { rain: 1, fog: 0.35, overcast: 1 }, FOG = { rain: 0, fog: 0.9, overcast: 0.6 };
+export const VIBE_PARTS = {
+  sad:     { terr: ['night', 'pine'], style: ['night'], look: ['night'], tod: ['night'], weather: [RAIN, RAIN, MIST] },
+  chill:   { terr: ['coast'], style: ['coast'], look: ['coast'], tod: ['golden', 'sunset'], weather: [CLEAR] },
+  upbeat:  { terr: ['chaparral'], style: ['desert', 'coast'], look: ['desert'], tod: ['midday'], weather: [CLEAR] },
+  intense: { terr: ['desert'], style: ['chaparral'], look: ['desert'], tod: ['afternoon'], weather: [STORM, STORM, FOG] },
+};
+const CUT_GAP = 650;           // a song's tunnel keeps the usual distance from other features
+const CUT_MIN_PART = 700;      // ...and leaves the region it cuts short at least this long
+
 const lerp = (a, b, t) => a + (b - a) * t;
 const clamp = (v, lo, hi) => (v < lo ? lo : v > hi ? hi : v);
 const smooth = t => t * t * (3 - 2 * t);
@@ -50,6 +68,22 @@ export function blendStyle(A, B, t) {
   return o;
 }
 
+// Ride to my music: the tempo bends the road. Slow songs get long sweepers, fast ones
+// tight corners and esses: u = 0 at TEMPO_SLOW BPM or below, 1 at TEMPO_FAST or above.
+export const TEMPO_SLOW = 85, TEMPO_FAST = 165;
+export function tempoStyle(st, bpm) {
+  const u = clamp((bpm - TEMPO_SLOW) / (TEMPO_FAST - TEMPO_SLOW), 0, 1);
+  const m = st.mix, k = 1.3 - 0.55 * u;                 // corner radii ×1.3 … ×0.75
+  return {
+    ...st,
+    mix: {
+      straight: m.straight * (1.3 - 0.7 * u), sweeper: (m.sweeper + 0.15) * (1.7 - 1.3 * u),
+      corner: m.corner * (0.35 + 1.15 * u), esses: m.esses * (0.3 + 1.5 * u), hairpin: m.hairpin * u,
+    },
+    sweeperR: st.sweeperR.map(v => v * k), cornerR: st.cornerR.map(v => v * k), essesR: st.essesR.map(v => v * k),
+  };
+}
+
 // The road near a tunnel, bridge or town: long sweepers, gentle grades.
 function calmOf(st) {
   return {
@@ -58,31 +92,15 @@ function calmOf(st) {
   };
 }
 
-export function makeRegions(seed, y0 = 140) {
+// director (Ride to my music): () => ({ vibe, bpm }), or null for the usual mix.
+export function makeRegions(seed, y0 = 140, director = null) {
   const r = mulberry32(hash2(seed, 4242));
   const pick = arr => arr[Math.floor(r() * arr.length)];
   const regions = [], features = [];
   const dayOff = 1 + r() * 2.5;              // start somewhere between midday and golden hour
 
-  function create(y) {
-    const prev = regions[regions.length - 1] || null;
-    const i = regions.length;
-    const s0 = prev ? prev.s1 : 0;
-
-    // Mix the parts; never repeat more than one of the last region's three. Land is
-    // picked by shape (pine and night are both mountainsides) and looks by family
-    // (pine and night are both forest), so "different" means visibly different.
-    let terrKey, styleKey, lookKey;
-    for (let k = 0; k < 12; k++) {
-      const shape = pick(SHAPES);
-      terrKey = pick(LAND[shape]);
-      styleKey = shape === 'coast' ? pick(['coast', 'desert', 'chaparral']) : pick(KEYS);
-      lookKey = r() < 0.4 ? terrKey : pick(KEYS);
-      if (!prev) break;
-      const same = (shape === BIOMES[prev.terrKey].terrain.mode) + (styleKey === prev.styleKey) + (FAMILY[lookKey] === FAMILY[prev.lookKey]);
-      if (same <= 1) break;
-    }
-
+  // A region's style, land and look from its three parts, at road altitude y.
+  function dress(terrKey, styleKey, lookKey, y) {
     // Sea level is set per region, below wherever the road happens to be, so sea
     // cliffs work at any altitude instead of forcing a 20 km descent to y = 0.
     const sea = terrKey === 'coast';
@@ -106,9 +124,44 @@ export function makeRegions(seed, y0 = 140) {
     const lb = BIOMES[lookKey];
     const palette = sea && !lb.palette.sand ? { ...lb.palette, sand: SAND } : lb.palette;
     const look = { key: lookKey, palette, props: lb.props, seaY };
+    return { terrKey, styleKey, lookKey, style, terrain, look, seaY };
+  }
+  // Ride to my music: the vibe's recipe, the road bent by the tempo.
+  function dressVibe(want, y) {
+    const V = VIBE_PARTS[want.vibe] || VIBE_PARTS.chill;
+    const d = dress(pick(V.terr), pick(V.style), pick(V.look), y);
+    d.style = tempoStyle(d.style, want.bpm || 110);
+    return { ...d, weather: pick(V.weather), tod: pick(V.tod), vibe: want.vibe, bpm: want.bpm };
+  }
+  const nameOf = d => `${LOOK_NAME[d.lookKey]} ${LAND_NAME[d.terrain.mode]}`;
 
-    let weather = CLEAR;                     // the first region is clear: a fair first look
-    if (prev) {
+  // enterAs / tunnelL: a song's cut forces a tunnel entry (of that length).
+  function create(y, enterAs = null, tunnelL = 0) {
+    const prev = regions[regions.length - 1] || null;
+    const i = regions.length;
+    const s0 = prev ? prev.s1 : 0;
+    const wish = director ? director() : null;
+
+    let d, weather = CLEAR;                  // the first region is clear: a fair first look
+    if (wish) ({ weather } = d = dressVibe(wish, y));
+    else {
+      // Mix the parts; never repeat more than one of the last region's three. Land is
+      // picked by shape (pine and night are both mountainsides) and looks by family
+      // (pine and night are both forest), so "different" means visibly different.
+      let terrKey, styleKey, lookKey;
+      for (let k = 0; k < 12; k++) {
+        const shape = pick(SHAPES);
+        terrKey = pick(LAND[shape]);
+        styleKey = shape === 'coast' ? pick(['coast', 'desert', 'chaparral']) : pick(KEYS);
+        lookKey = r() < 0.4 ? terrKey : pick(KEYS);
+        if (!prev) break;
+        const same = (shape === BIOMES[prev.terrKey].terrain.mode) + (styleKey === prev.styleKey) + (FAMILY[lookKey] === FAMILY[prev.lookKey]);
+        if (same <= 1) break;
+      }
+      d = dress(terrKey, styleKey, lookKey, y);
+    }
+
+    if (prev && !wish) {
       const w = r();
       weather = w < 0.5 ? CLEAR
         : w < 0.68 ? { rain: 0, fog: 0, overcast: 0.6 + 0.4 * r() }
@@ -117,18 +170,15 @@ export function makeRegions(seed, y0 = 140) {
     }
 
     const len = 2600 + 3400 * r();
-    const enter = prev ? (r() < 0.5 ? 'tunnel' : 'blend') : 'start';
-    const reg = {
-      i, s0, s1: s0 + len, enter, styleKey, terrKey, lookKey, style, terrain, look, weather, seaY,
-      name: `${LOOK_NAME[lookKey]} ${LAND_NAME[terrain.mode]}`,
-    };
+    const enter = enterAs || (prev ? (r() < 0.5 ? 'tunnel' : 'blend') : 'start');
+    const reg = { i, s0, s1: s0 + len, enter, ...d, weather, y, name: nameOf(d) };
     regions.push(reg);
 
     // ---- features ----
     const placed = [];
     if (enter === 'tunnel') {
       // The change happens at the tunnel's midpoint, out of sight.
-      const L = 240 + 360 * r();
+      const L = tunnelL || 240 + 360 * r();
       placed.push({ type: 'tunnel', s0: s0 - L / 2, s1: s0 + L / 2, H: 11 + 4 * r(), H2: 22 + 28 * r(), change: true, region: i });
     }
     const a = s0 + 1100, b = reg.s1 - 1100;
@@ -241,6 +291,13 @@ export function makeRegions(seed, y0 = 140) {
     T.a = DAY[((k % 6) + 6) % 6];
     T.b = DAY[(((k + 1) % 6) + 6) % 6];
     T.t = f < 0.5 ? 0 : smooth((f - 0.5) / 0.5);
+    // A music region brings its own time of day; a region without one (after the music
+    // stopped) falls back to the clock's.
+    const m = mix(s);
+    if (m.a.tod || m.b.tod) {
+      const clock = T.t < 0.5 ? T.a : T.b;
+      T.a = m.a.tod || clock; T.b = m.b.tod || clock; T.t = m.t;
+    }
     return T;
   }
 
@@ -265,8 +322,40 @@ export function makeRegions(seed, y0 = 140) {
     return m.t < 0.5 ? (m.a.seaY ?? m.b.seaY) : (m.b.seaY ?? m.a.seaY);
   }
 
+  // ---- Ride to my music ----
+  // A new song. Nothing from sMin on has been built (the caller makes sure), so it's
+  // all thrown away: a region-changing tunnel goes in as soon after sMin as the
+  // features already placed allow, and the region beyond its midpoint is dressed for
+  // whatever the director says now. Returns that region.
+  function songCut(sMin, y) {
+    while (features.length && features[features.length - 1].s0 - TUNNEL_LEAD >= sMin) features.pop();
+    while (regions.length > 1) {
+      const R = regions[regions.length - 1];
+      if (R.s0 < sMin || features.some(f => f.region === R.i)) break;   // started, or its tunnel has
+      regions.pop();
+    }
+    const K = regions[regions.length - 1], last = features[features.length - 1];
+    const L = 240 + 360 * r();
+    let c = Math.max(sMin + L / 2, K.s0 + CUT_MIN_PART);
+    if (last) c = Math.max(c, last.s1 + CUT_GAP + L / 2);
+    K.s1 = c;
+    return create(y, 'tunnel', L);
+  }
+  // Dress a region nobody has seen yet (the caller makes sure) for the director's vibe
+  // now. Its extent, entry and features stay, and so does its road width, which the
+  // road may already have been built with.
+  function redress(reg) {
+    const want = director?.();
+    if (!want) return reg;
+    const { halfWidth, shoulder } = reg.style;
+    const d = dressVibe(want, reg.y);
+    Object.assign(reg, d, { name: nameOf(d) });
+    reg.style = { ...reg.style, halfWidth, shoulder };
+    return reg;
+  }
+
   return {
-    regions, features, extend, style, profile, look, tod, weather, tunnelAt, seaAt,
+    regions, features, extend, style, profile, look, tod, weather, tunnelAt, seaAt, songCut, redress,
     regionAt: s => regions[regionIndex(s)],
     featureAt: s => featureNear(s, 0, 0),
     featuresIn(s0, s1) { return features.filter(f => f.s1 >= s0 && f.s0 <= s1); },

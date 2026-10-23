@@ -148,6 +148,8 @@ export function createTraffic(scene, course, { density = 0.7, seed = 1 } = {}) {
   return {
     update, render,
     get cars() { return cars; },
+    // Ride to my music: busier roads for faster songs (applies to cars not yet spawned).
+    setDensity(d) { density = d; },
     dots(out) {
       for (const c of cars) { road.at(c.s, q); out.push({ x: q.x - Math.sin(q.psi) * c.lane, z: q.z + Math.cos(q.psi) * c.lane, color: c.dir > 0 ? '#5ac8fa' : '#ffcf4a', r: 4 }); }
       return out;

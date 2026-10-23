@@ -22,11 +22,15 @@ import { createAudio } from './audio.js';
 import { createUI, fmtTime } from './ui.js';
 import { encodeGhost, decodeGhost, extractCode, cleanName, GhostError } from './ghost-share.js';
 import { createOnline } from './online.js';
+import { pickMusicTab, createMusic, MusicError } from './music.js';
+import { VIBES, SCENE_NAME } from './music-scene.js';
+import { VIBE_PARTS } from './regions.js';
+import { createCalibration, calibLabel, calibFileName, CALIB_KEY } from './music-calibrate.js';
 
 const STORE = 'arcade:canyon:v1';
 const GHOST = id => `arcade:canyon:ghost:${id}`;
 const RIVAL = id => `arcade:canyon:rival:${id}`;     // a friend's ghost code, one per stage
-const DEFAULTS = { aids: 'full', gearbox: 'auto', units: 'mph', camera: 'chase', tilt: 'on', traffic: 'on', ghost: 'on', quality: 'high', volume: '0.6' };
+const DEFAULTS = { aids: 'full', gearbox: 'auto', units: 'mph', camera: 'chase', tilt: 'on', traffic: 'on', ghost: 'on', quality: 'high', volume: '0.6', musicEngine: '0.35', musicKick: 'on' };
 const DEG = Math.PI / 180;
 const GHOST_HZ = 20;
 const clamp = (v, lo, hi) => (v < lo ? lo : v > hi ? hi : v);
@@ -66,6 +70,8 @@ function poseGhost(mesh, G, clock) {
 export function init(sharedCanvas, services) {
   const { mount, input, hud: shell } = services;
   const debug = new URLSearchParams(location.search).has('canyondebug');
+  // ?calibrate=1: music rides ride themselves and record the analysis's readings (music-calibrate.js).
+  const calibrate = new URLSearchParams(location.search).get('calibrate') === '1';
 
   // ---------- canvas + renderer (our own canvas: see the arcade README) ----------
   sharedCanvas.hidden = true;
@@ -179,6 +185,14 @@ export function init(sharedCanvas, services) {
   const actions = {
     stages() { ui.renderStages(store.records, settings.units, medalsFor); ui.show('stages'); },
     endless() { startRide({ ...ENDLESS, seed: (Date.now() % 100000) | 0 }); },
+    music() { startMusicRide(); },
+    musicStop() { stopMusic(true); },
+    musicEngine(v) { settings.musicEngine = String(v); persist(); if (music) audio?.setDuck(Number(v)); },
+    calibSave() { const c = calib || lastCalib; if (c) downloadJson(c.fileName(), c.data()); },
+    calibLast() {
+      if (lastCalib) { actions.calibSave(); return; }
+      try { const d = JSON.parse(storage.get(CALIB_KEY)); downloadJson(calibFileName(new Date(d.startedAt)), d); } catch {}
+    },
     demo() { startRide(STAGES[Math.floor(Math.random() * STAGES.length)], { demo: true }); },
     settings() { settingsFrom = ui.screen; ui.renderSettings(settings); ui.show('settings'); },
     help() { ui.show('help'); },
@@ -201,7 +215,7 @@ export function init(sharedCanvas, services) {
       const i = STAGES.findIndex(s => s.id === session.def.id);
       startRide(i >= 0 && i < STAGES.length - 1 ? STAGES[i + 1] : { ...ENDLESS, seed: (Date.now() % 100000) | 0 });
     },
-    quit() { if (session?.online) { online.quitRace(); return; } endSession(); showGarage(); },
+    quit() { if (session?.online) { online.quitRace(); return; } stopMusic(false); endSession(); showGarage(); },
     fullscreen() { toggleFullscreen(); },
     // race friends (online.js)
     race() { online.open(); },
@@ -266,6 +280,7 @@ export function init(sharedCanvas, services) {
   };
   let settingsFrom = 'title';
   const ui = createUI(mount, actions);
+  if (calibrate && storage.get(CALIB_KEY)) ui.calibLast(true);
 
   // ---------- kit models and the rider (assets.js) ----------
   // Fetched once per page; a ride waits for them. If they fail, the world uses its
@@ -342,10 +357,13 @@ export function init(sharedCanvas, services) {
     mark('fs', k('KeyF'));
     mark('sup', k('KeyE') || btn(5));
     mark('sdn', k('KeyQ') || btn(4));
+    for (let v = 1; v <= 5; v++) mark('v' + v, k('Digit' + v) || k('Numpad' + v));   // music: sky 1–4, 5 = auto
+    mark('song', k('KeyN'));                                                         // music: new scene now
     const edge = n => now.has(n) && !prev.has(n);
     const e = {
       up: edge('up'), down: edge('down'), enter: edge('enter'), pause: edge('pause'),
       cam: edge('cam'), respawn: edge('respawn'), fs: edge('fs'), shiftUp: edge('sup'), shiftDown: edge('sdn'),
+      vibe: [1, 2, 3, 4, 5].find(v => edge('v' + v)) || 0, song: edge('song'),
     };
     prev.clear(); for (const n of now) prev.add(n);
 
@@ -373,25 +391,32 @@ export function init(sharedCanvas, services) {
   }
 
   // ---------- camera ----------
+  // Helmet (cockpit) view: the eyes in the helmet's frame (m; +x the visor, +y up, from its
+  // centre), the camera's offset from them in the bike's frame (m; +x forward, +y up), the
+  // look-down (rad), the vertical FOV at rest and its widening at speed (deg), and the near
+  // plane. The rider's eyes sit right above the grips, so the camera sits behind and above them
+  // (a racing-game cockpit) with the head and torso hidden. ?canyondebug: window.__canyon.fpv.
+  const FPV = { eye: new THREE.Vector3(0.08, 0.01, 0), back: new THREE.Vector3(-0.66, 0.14, 0), pitch: 0.32, fov: 80, fovGain: 4, near: 0.05 };
   let camMode = settings.camera;
   const camPos = new THREE.Vector3(), camLook = new THREE.Vector3(), tmpV = new THREE.Vector3();
-  let camYaw = 0, camInit = false, shake = 0, debugView = null;
+  let camYaw = 0, camInit = false, shake = 0, debugView = null, beatKick = 0;
   function updateCamera(b, dt, cinematic) {
     const fwdX = Math.cos(b.psi), fwdZ = Math.sin(b.psi);
     if (!camInit) { camYaw = b.psi; camInit = true; }
     camYaw += wrap(b.psi - camYaw) * Math.min(1, dt * (camMode === 'close' ? 6 : 4.2));
     const groundAt = (x, z) => session.course.groundAt(x, z);
-    if (camMode === 'helmet' && !cinematic && !b.crashed) {
-      model.riderHelmet.getWorldPosition(camPos);
-      camPos.x += fwdX * 0.12; camPos.z += fwdZ * 0.12; camPos.y += 0.02;
+    const fpv = camMode === 'helmet' && !cinematic && !b.crashed;
+    if (fpv) {
+      // From the rider's head (it follows lean and tuck), behind and above the eyes.
+      model.eyeWorld(camPos, FPV.eye, FPV.back);
       camera.position.copy(camPos);
       camera.rotation.set(0, 0, 0, 'YXZ');
-      camera.rotation.set(-0.12, -b.psi - Math.PI / 2, 0, 'YXZ');
+      camera.rotation.set(-FPV.pitch, -b.psi - Math.PI / 2, 0, 'YXZ');
       camera.rotateZ(-b.phi * 0.75);
-      camera.near = 0.05;
+      camera.near = FPV.near;
     } else {
       const dist = (camMode === 'close' ? 2.6 : 3.35) + b.v * (camMode === 'close' ? 0.008 : 0.014);
-      const h = camMode === 'close' ? 1.15 : 1.38;
+      const h = camMode === 'close' ? 1.15 : 1.62;           // chase sits a little higher (was 1.38)
       tmpV.set(b.x - Math.cos(camYaw) * dist, b.y + h, b.z - Math.sin(camYaw) * dist);
       const g = groundAt(tmpV.x, tmpV.z);
       if (tmpV.y < g + 0.6) tmpV.y = g + 0.6;
@@ -402,7 +427,8 @@ export function init(sharedCanvas, services) {
         camera.position.x += (Math.random() - 0.5) * shake; camera.position.y += (Math.random() - 0.5) * shake;
         shake = Math.max(0, shake - dt * 0.8);
       }
-      camLook.set(b.x + fwdX * 4, b.y + 0.9, b.z + fwdZ * 4);
+      camera.position.y -= 0.04 * beatKick;              // music: a small dip on strong beats
+      camLook.set(b.x + fwdX * 4, b.y + (camMode === 'close' ? 0.9 : 0.78), b.z + fwdZ * 4); // chase looks down ~6 deg (was ~4)
       camera.up.set(0, 1, 0);
       camera.lookAt(camLook);
       if (settings.tilt === 'on') camera.rotateZ(-b.phi * 0.22);
@@ -415,10 +441,10 @@ export function init(sharedCanvas, services) {
       camera.up.set(0, 1, 0);
       camera.lookAt(b.x, b.y, b.z);
     }
-    const fov = 55 + clamp(b.v / 66, 0, 1) * 12;
+    const fov = (fpv ? FPV.fov : 55) + clamp(b.v / 66, 0, 1) * (fpv ? FPV.fovGain : 12) + 1.2 * beatKick;
     if (Math.abs(camera.fov - fov) > 0.05) camera.fov += (fov - camera.fov) * Math.min(1, dt * 3);
     camera.updateProjectionMatrix();
-    model.riderHelmet.visible = !(camMode === 'helmet' && !cinematic);
+    model.cockpit(fpv);
   }
 
   // ---------- sparks (knee sliders, footpegs, crashes) ----------
@@ -478,7 +504,10 @@ export function init(sharedCanvas, services) {
 
   // online: an online race (online.js) — same ride, no traffic, no ghosts, a shared green light.
   function buildSession(def, demo, online = null) {
-    const course = makeCourse(def);
+    // Ride to my music: only a solo Endless that asked for it, with the music still on.
+    const musicOn = !!(def.music && music && !demo && !online);
+    if (!musicOn) stopMusic(false);
+    const course = makeCourse(musicOn ? { ...def, director: () => music?.want ?? null } : def);
     const world = createWorld(scene, renderer, course, { quality: settings.quality, kit });
     garage.scene.remove(model.group);
     scene.add(model.group, model.riderWorld, sparks, ghostMesh, rivalMesh);
@@ -487,7 +516,7 @@ export function init(sharedCanvas, services) {
     world.prewarm({ x: bike.x, y: bike.y, z: bike.z, s: bike.s, fx: Math.cos(bike.psi), fz: Math.sin(bike.psi) });
     const medals = course.endless ? null : medalTimes(course.road, course.startS, course.length);
     const traffic = settings.traffic === 'on' && !online
-      ? createTraffic(scene, course, { density: def.traffic ?? 0.7, seed: def.seed })
+      ? createTraffic(scene, course, { density: musicOn ? trafficFor(music.want.bpm) : def.traffic ?? 0.7, seed: def.seed })
       : null;
     // ghost of the best run on this stage
     let ghost = null;
@@ -512,7 +541,15 @@ export function init(sharedCanvas, services) {
       laneT: 0, laneWarned: false, kneeCool: 0, wheelieShown: false, wrongT: 0, offT: 0,
       nextCp: course.endless ? 1500 : course.checkpoints[0], finished: false, finishT: 0,
       mapClock: 0, events: { hit: false, nearMiss: [] }, online,
+      musicOn, musicPending: null, musicT: 0,
     };
+    ui.musicMode(musicOn);
+    ui.calibMode(musicOn && !!calib);
+    if (musicOn && calib) {                      // calibrating: the autopilot rides, hands-off
+      const pilot = makeAutopilot(course, { pace: 0.88 }), me = session;
+      session.calibBot = true;
+      session.bot = b => pilot(b, passLane(me, b));
+    }
     if (online) { session.clock = (performance.now() - online.goAt) / 1000; ui.onlineMode(true); }
     camInit = false; camPos.set(0, 0, 0);
     world.setQuality(settings.quality);
@@ -521,19 +558,20 @@ export function init(sharedCanvas, services) {
     ui.hud.show(true);
     ui.hud.split('');
     shell.setScore(0);
-    shell.setStatus(demo ? 'Demo lap — the autopilot is riding. Esc to stop.' : 'W/↑ throttle · S/↓ brake · A/D lean · Space tuck · Shift wheelie · C camera · Esc pause');
+    shell.setStatus(demo ? 'Demo lap — the autopilot is riding. Esc to stop.' : 'W/↑ throttle · S/↓ brake · A/D lean · Space tuck · Shift wheelie · C camera · Esc pause' + (musicOn ? ' · 1–4 sky · 5 auto · N new scene' : ''));
     mode = 'countdown';
     audio?.resume();
   }
 
   function endSession() {
     if (!session) return;
-    if (session.course.endless && !session.demo) {
+    if (session.course.endless && !session.demo && !session.calibBot) {
       const er = store.records.endless || {};
       const dist = session.bike.s - session.course.startS;
       store.records.endless = { bestDist: Math.max(er.bestDist || 0, dist), bestScore: Math.max(er.bestScore || 0, session.score) };
       persist();
     }
+    if (session.musicOn) { ui.musicMode(false); beatKick = 0; }
     session.world.destroy();
     session.traffic?.destroy();
     if (session.online) { online.endRide(); ui.onlineMode(false); }
@@ -564,6 +602,177 @@ export function init(sharedCanvas, services) {
       audio?.resume();
       prevTime = performance.now();
     }
+  }
+
+  // ---------- ride to my music ----------
+  // The share picker comes first: Chrome only opens it with this click's activation.
+  // Anything that goes wrong lands on the music screen, with what to do about it.
+  let music = null, musicBusy = false;
+  let calib = null, lastCalib = null, calibBackupAt = 0;
+  const musicDef = () => ({ ...ENDLESS, name: 'Ride to my music', seed: (Date.now() % 100000) | 0, music: true });
+  const trafficFor = bpm => 0.45 + 0.75 * clamp((bpm - 80) / 90, 0, 1);     // 0.45 (slow) … 1.2 (fast)
+  async function startMusicRide() {
+    if (musicBusy) return;
+    musicBusy = true;
+    ui.musicMsg('');
+    try {
+      const stream = await pickMusicTab();
+      await beginMusic(stream);
+      startRide(musicDef());
+    } catch (e) {
+      ui.musicMsg(e instanceof MusicError ? e.message : 'Something went wrong starting the music. Try again.', 'red');
+      if (!(e instanceof MusicError)) console.warn('Canyon: music mode failed to start', e);
+      ui.show('music');
+    } finally { musicBusy = false; }
+  }
+  // source: the shared tab's stream, or (test hook) a generated AudioBuffer.
+  async function beginMusic(source) {
+    await audioPromise;
+    if (!audio) {
+      if (source instanceof MediaStream) source.getTracks().forEach(t => t.stop());
+      throw new MusicError('nosound', 'The game\u2019s sound didn\u2019t start, so it can\u2019t listen either. Reload the page and try again.');
+    }
+    stopMusic(false);
+    calib = calibrate ? createCalibration({ sampleRate: audio.context.sampleRate, now: () => performance.now() }) : null;
+    calibBackupAt = performance.now();
+    music = await createMusic(audio.context, source, {
+      onEnded: () => stopMusic(true),
+      onEvent: calib && (ev => calib?.event(ev)),
+      onPush: calib && calibTick,
+    });
+    audio.setDuck(Number(settings.musicEngine));
+    audio.resume();
+  }
+  // Stop listening (Stop button, Chrome's Stop sharing bar, leaving). A ride carries on
+  // as plain Endless: land already made keeps its scene, new land is the usual mix.
+  function stopMusic(tell) {
+    if (!music) return;
+    music.stop();
+    music = null;
+    if (calib) finishCalib();
+    audio?.setDuck(1);
+    beatKick = 0;
+    const s = session;
+    if (s?.musicOn) {
+      s.musicOn = false;
+      s.world.music(0, 1);
+      s.world.setSky(null); s.sky = null;
+      s.traffic?.setDensity(s.def.traffic ?? 0.7);
+      ui.musicMode(false);
+      if (tell) ui.message('MUSIC STOPPED', 'warn');
+      shell.setStatus('W/↑ throttle · S/↓ brake · A/D lean · Space tuck · Shift wheelie · C camera · Esc pause');
+    }
+  }
+  // Calibration: a sample a second (driven by the audio blocks, so it keeps going while
+  // the tab is in the background), a localStorage backup every 30 s.
+  function calibTick() {
+    if (!calib || !music) return;
+    const st = music.status;
+    calib.tick(music.analyzer, st.vibe, st.override, music.scenes);
+    if (performance.now() - calibBackupAt > 30000) { calibBackupAt = performance.now(); backupCalib(calib); }
+  }
+  const backupCalib = c => storage.set(CALIB_KEY, JSON.stringify(c.data()));
+  // The music stopped (Stop, Chrome's Stop sharing, leaving): back it up and offer the file.
+  function finishCalib() {
+    const c = calib;
+    calib = null;
+    ui.calibMode(false);
+    if (!c.count) return;
+    lastCalib = c;
+    backupCalib(c);
+    ui.calibLast(true);
+    downloadJson(c.fileName(), c.data());
+    if (session) ui.message('CALIBRATION SAVED', 'gold');
+  }
+  function downloadJson(name, obj) {
+    const url = URL.createObjectURL(new Blob([JSON.stringify(obj)], { type: 'application/json' }));
+    const a = document.createElement('a');
+    a.href = url; a.download = name;
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }
+  // A new scene (the rolling window moved into another box, a new song's window filled,
+  // or the player picked one): dress the land ahead for it if that's still out of sight,
+  // else cut again if where you're heading doesn't match.
+  function settleVibe(s) {
+    const p = s.musicPending, b = s.bike, want = music.want.vibe;
+    const ahead = p && p.s0 > b.s;
+    if (ahead && s.course.musicRedress(p, b.s)) return;
+    const reg = s.course.regionAt(ahead ? p.s0 + 1 : b.s);
+    if (reg && reg.vibe !== want) s.musicPending = s.course.musicCut(b.s);
+  }
+  // Every frame of a music ride: song events, then the beat into the lights and HUD.
+  function frameMusic(s, dt) {
+    for (const ev of music.drain()) {
+      // A new song only restarts the window; its tunnel waits for its scene (the 'scene'
+      // event ~10 s in). Cutting at once dressed the land past the tunnel for the OLD
+      // scene, and at speed it was too close to re-dress by the time the new one came.
+      if (ev.type === 'scene') settleVibe(s);
+      else if (ev.type === 'pause') ui.message('MUSIC PAUSED', 'warn');
+    }
+    fadeSky(s, dt);
+    const v = music.frame(performance.now(), dt);
+    s.world.music(v.pulse, v.light);
+    ui.hud.beat(v.pulse);
+    beatKick = settings.musicKick === 'on' ? v.kick : 0;
+    s.musicT += dt;
+    if (s.musicT > 1) { s.musicT = 0; s.traffic?.setDensity(trafficFor(music.want.bpm)); }
+    ui.hud.music(s.skyPick ? { ...music.status, vibe: s.skyPick, scene: SCENE_NAME[s.skyPick] + ' sky', override: true, listening: false } : music.status);
+    if (calib) ui.hud.calib(calibLabel(calib.seconds, calib.songs));
+  }
+  // The sky (time of day + weather) follows the scene straight away, over SKY_FADE_S; the
+  // land still waits for the scene's tunnel, which has to start past the built road.
+  const SKY_FADE_S = 10;
+  const skyOf = v => { const V = VIBE_PARTS[v]; return { tod: V.tod[V.tod.length - 1], weather: V.weather[0] }; };
+  function fadeSky(s, dt) {
+    const ready = music.scenes.ready || music.status.override || s.skyPick;
+    if (!ready && !s.sky) return;                              // first window still filling: the road's sky
+    const want = s.skyPick || music.want.vibe;
+    if (!s.sky) {
+      // Start from what's on screen now: the road's time of day and weather here.
+      const tm = s.course.todAt(s.bike.s), w = s.course.weatherAt(s.bike.s);
+      s.sky = { scene: null, from: { tod: tm.t < 0.5 ? tm.a : tm.b, weather: { ...w } }, to: null, t: 1,
+        out: { tod: { a: '', b: '', t: 0 }, weather: { rain: 0, fog: 0, overcast: 0 } } };
+      s.sky.to = s.sky.from;
+    }
+    const k = s.sky;
+    if (k.scene !== want) {
+      if (k.to) k.from = k.t < 0.5 ? k.from : k.to;            // mid-fade: start from the nearer end
+      k.to = skyOf(want); k.scene = want; k.t = 0;
+    }
+    k.t = Math.min(1, k.t + dt / SKY_FADE_S);
+    const e = k.t * k.t * (3 - 2 * k.t), A = k.from.weather, B = k.to.weather;
+    k.out.tod.a = k.from.tod; k.out.tod.b = k.to.tod; k.out.tod.t = e;
+    k.out.weather.rain = A.rain + (B.rain - A.rain) * e;
+    k.out.weather.fog = A.fog + (B.fog - A.fog) * e;
+    k.out.weather.overcast = A.overcast + (B.overcast - A.overcast) * e;
+    s.world.setSky(k.out);
+  }
+  // N: a different scene now — what the music measures if that differs, else the next one.
+  function newScene(s) {
+    const cur = music.want.vibe, box = music.scenes.box;
+    const next = box && box !== cur ? box : VIBES[(VIBES.indexOf(cur) + 1) % VIBES.length];
+    s.skyPick = null;                                          // N also hands the sky back to the music
+    if (music.want.vibe === next && music.status.override) return;
+    music.setOverride(next);
+    ui.message(`SCENE: ${SCENE_NAME[next].toUpperCase()}`, 'gold');
+    settleVibe(s);
+  }
+  // Keys 1–4: the sky only (time of day + weather), at once; the land keeps following the
+  // music. Holds until N. (They used to set the scene, whose land starts ~1.5 km ahead, so a
+  // press showed nothing for a minute and looked broken.)
+  function pickVibe(s, k) {
+    if (k === 5) {                                             // 5: everything back to the music
+      s.skyPick = null;
+      music.clearOverride();
+      ui.message('AUTO: FOLLOWING THE MUSIC', 'gold');
+      settleVibe(s);
+      return;
+    }
+    const v = VIBES[k - 1];
+    if (s.skyPick === v) return;
+    s.skyPick = v;
+    ui.message(`SKY: ${SCENE_NAME[v].toUpperCase()}`, 'gold');
   }
 
   // --- scoring helpers ---
@@ -647,6 +856,11 @@ export function init(sharedCanvas, services) {
     return ragFocus;
   }
 
+  // Pass slower cars on the inside of our own lane, like a considerate rider.
+  function passLane(s, b) {
+    if (s.traffic) for (const c of s.traffic.cars) if (c.dir > 0 && c.s - b.s > -7 && c.s - b.s < 55) return 0.55;
+    return 1.75;
+  }
   // One fixed physics step of the ride.
   const kneeW = new THREE.Vector3();
   function stepRide(dt) {
@@ -654,15 +868,10 @@ export function init(sharedCanvas, services) {
     const aids = AIDS[settings.aids];
     let inp = ctl;
     if (s.bot) inp = s.bot(b);                     // debug: autopilot on a scored run
-    if (s.demo) {
-      // Pass slower cars on the inside of our own lane, like a considerate rider.
-      let laneNow = 1.75;
-      if (s.traffic) for (const c of s.traffic.cars) if (c.dir > 0 && c.s - b.s > -7 && c.s - b.s < 55) { laneNow = 0.55; break; }
-      inp = s.drive(b, laneNow);
-    }
+    if (s.demo) inp = s.drive(b, passLane(s, b));
     if (s.finished) inp = { throttle: 0, brake: b.v > 3 ? 0.35 : 0, lean: s.drive ? s.drive(b).lean : 0, tuck: false };
     const wasCrashed = b.crashed;
-    stepBike(b, inp, s.course, { aids: s.demo ? AIDS.full : aids, auto: s.demo || settings.gearbox === 'auto' });
+    stepBike(b, inp, s.course, { aids: s.demo || s.calibBot ? AIDS.full : aids, auto: s.demo || s.calibBot || settings.gearbox === 'auto' });
     ctl.shiftUp = ctl.shiftDown = false;
     s.t += dt;
     if (!s.finished) s.clock += dt;
@@ -865,9 +1074,11 @@ export function init(sharedCanvas, services) {
     // world, model, camera
     const fx = Math.cos(b.psi), fz = Math.sin(b.psi);
     s.world.update({ x: b.x, y: b.y, z: b.z, s: b.s, fx, fz }, time);
+    if (s.musicOn && music) frameMusic(s, dt);
     mark('world');
     const night = s.world.env.headlight;
     model.update(b, { dt, tuck: ctl.tuck || (s.demo && b.v > 30), wheelie: b.wAssist ? clamp(b.pitch / (WHEELIE_ASSIST_DEG * DEG), 0, 1) : 0, braking: (s.demo ? false : ctl.brake > 0.1) || b.ax < -3, night, gradeAngle: Math.atan(b.grade) });
+    model.dash(b.v * (settings.units === 'mph' ? 2.23694 : 3.6), settings.units === 'mph', b.v < 0.3 && b.gear === 0 ? 0 : b.gear + 1, b.rpm);   // redraws only on a change, <= 12 Hz
     // Crashed: the rider tumbles on their own, the camera follows them, and the bike
     // throws sparks for as long as it's still sliding.
     const rag = b.crashed && s.rag;
@@ -993,15 +1204,19 @@ export function init(sharedCanvas, services) {
       if (e.enter && !input.isDown('Enter')) ui.activate();   // Enter clicks natively
       if (e.pause) {
         if (mode === 'paused') setPaused(false);
-        else if (['settings', 'help', 'stages', 'ghosts', 'race'].includes(ui.screen)) actions.back();
+        else if (['settings', 'help', 'stages', 'ghosts', 'race', 'music'].includes(ui.screen)) actions.back();
       }
     } else if (session) {
       if (e.pause) { if (session.demo) { endSession(); showGarage(); } else setPaused(true); }
       if (e.cam) { camMode = camMode === 'chase' ? 'close' : camMode === 'close' ? 'helmet' : 'chase'; settings.camera = camMode; persist(); }
       if (e.respawn && mode === 'ride' && !session.demo && (!session.bike.crashed || session.crashT > 0.8)) respawn();
+      if (session.musicOn && music) {
+        if (e.vibe) pickVibe(session, e.vibe);
+        if (e.song) newScene(session);
+      }
       if (session.demo && (e.enter)) { endSession(); showGarage(); }
-      // auto-pause when the tab/window loses focus
-      if ((document.hidden || !document.hasFocus()) && (mode === 'ride' || mode === 'countdown') && !session.demo && !session.online) setPaused(true);
+      // auto-pause when the tab/window loses focus (not to music: you switch to its tab to skip songs)
+      if ((document.hidden || !document.hasFocus()) && (mode === 'ride' || mode === 'countdown') && !session.demo && !session.online && !session.musicOn) setPaused(true);
     }
 
     if (session && mode !== 'garage' && mode !== 'loading') {
@@ -1047,6 +1262,56 @@ export function init(sharedCanvas, services) {
         return { msPerFrame: (performance.now() - t0) / n, calls: renderer.info.render.calls, tris: renderer.info.render.triangles };
       },
       timescale(v) { timeScale = v; },
+      // Ride to my music without a tab: src (an AudioBuffer, { samples, sampleRate } or
+      // a URL) goes through the same tap and analysis. In a music ride it plays into the
+      // running analysis; otherwise it starts one.
+      async musicFrom(src) {
+        await audioPromise;
+        const ctx = audio.context;
+        let buf = src;
+        if (typeof src === 'string') buf = await ctx.decodeAudioData(await (await fetch(src)).arrayBuffer());
+        else if (src && src.samples) { buf = ctx.createBuffer(1, src.samples.length, src.sampleRate); buf.copyToChannel(src.samples, 0); }
+        if (music && session?.musicOn) { music.play(buf); return 'playing'; }
+        await beginMusic(buf);
+        startRide(musicDef());
+        return 'started';
+      },
+      music() {
+        if (!music || !session) return null;
+        const a = music.analyzer, b = session.bike, p = session.musicPending, r = session.course.regionAt(b.s);
+        const reg = x => x && { name: x.name, vibe: x.vibe, tod: x.tod, bpm: x.bpm && Math.round(x.bpm), s0: Math.round(x.s0), weather: x.weather };
+        return {
+          ...music.status, box: music.scenes.box, medBpm: Math.round(music.scenes.bpm * 10) / 10, medHz: Math.round(music.scenes.hz), raw: Math.round(a.rawBpm * 10) / 10, settled: a.settled, songTime: +a.songTime.toFixed(1),
+          mode: a.mode.mode, loud: +a.loud.toFixed(1), centroid: Math.round(a.centroid), beats: a.beats, cpuMsPerFrame: +music.cpuPerFrame.toFixed(3),
+          s: Math.round(b.s), region: reg(r), pending: reg(p), want: music.want, kick: settings.musicKick, duck: settings.musicEngine,
+        };
+      },
+      // Stand-in for Chrome's share picker: 'noaudio' (a video-only share), 'deny'
+      // (cancelled), or { samples, sampleRate } (a share whose sound is that audio, as a
+      // real MediaStream). Each call is logged with whether it had a click's activation.
+      stubDisplayMedia(kind) {
+        const md = navigator.mediaDevices;
+        if (!md.__realGDM) md.__realGDM = md.getDisplayMedia;
+        md.__calls = [];
+        md.getDisplayMedia = async opts => {
+          md.__calls.push({ activation: navigator.userActivation?.isActive ?? null, opts });
+          if (kind === 'deny') throw new DOMException('Permission denied', 'NotAllowedError');
+          const video = document.createElement('canvas').captureStream(1).getVideoTracks();
+          if (kind === 'noaudio') return new MediaStream(video);
+          const ctx = audio.context, buf = ctx.createBuffer(1, kind.samples.length, kind.sampleRate);
+          buf.copyToChannel(kind.samples, 0);
+          const src = ctx.createBufferSource(), dst = ctx.createMediaStreamDestination();
+          src.buffer = buf; src.connect(dst); src.start();
+          return new MediaStream([...video, ...dst.stream.getAudioTracks()]);
+        };
+        return md.__calls;
+      },
+      unstubDisplayMedia() { const md = navigator.mediaDevices; if (md.__realGDM) { md.getDisplayMedia = md.__realGDM; delete md.__realGDM; } },
+      displayMediaCalls: () => navigator.mediaDevices.__calls || [],
+      // Chrome's own "Stop sharing" bar ends the track; this fires the same event.
+      // ?calibrate=1: the recording (live, or the last one) as it would be saved.
+      calib: () => (calib || lastCalib)?.data() ?? null,
+      endShare() { const t = music?.track; if (!t) return false; t.dispatchEvent(new Event('ended')); return true; },
       // Instanced pools in the scene: live instance count and triangles per instance.
       online: () => online.stats(),
       props() {
@@ -1071,6 +1336,7 @@ export function init(sharedCanvas, services) {
       info: () => ({ calls: renderer.info.render.calls, tris: renderer.info.render.triangles, geos: renderer.info.memory.geometries, tex: renderer.info.memory.textures, res: resScale, fps: Math.round(1000 / ftAvg) }),
       jump(s) { if (session) { placeBike(session.bike, session.course.road, s, 1.75, 20); camInit = false; } },
       camera(m) { camMode = m; },
+      fpv: FPV,
       view(back, up, side) { debugView = back == null ? null : [back, up, side]; },
       // Force a crash of a given kind ('Highside — …', 'Lowside — …', 'Hit a car', …).
       crash(why = 'Lowside — ran out of grip') { if (session && !session.bike.crashed) { crash(session.bike, why); onCrash(why); } },
@@ -1123,6 +1389,7 @@ export function init(sharedCanvas, services) {
     destroy() {
       cancelAnimationFrame(frame);
       mode = 'destroyed';                          // a queued buildSession must not run
+      stopMusic(false);
       endSession();
       online.destroy();
       removeEventListener('resize', resize);

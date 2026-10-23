@@ -9,6 +9,12 @@ import { makeTerrain, gridHeight, TILE } from './terrain.js';
 import { BIOMES } from './stages.js';
 import { makeRegions } from './regions.js';
 
+// Ride to my music: a new song's tunnel starts at least MUSIC_AHEAD past the rider,
+// beyond everything world.js may have built (road meshes reach 1.2 km plus one 200 m
+// chunk; terrain tiles under 1 km). Its region can be re-dressed while its start is
+// still MUSIC_REDRESS ahead — no tile beyond it can exist yet.
+const MUSIC_AHEAD = 1500, MUSIC_REDRESS = 1100;
+
 export function makeCourse(def) {
   const endless = def.id === 'endless';
   let styleAt, profileAt, biomeAt, todAt, regions = null, road = null;
@@ -26,7 +32,7 @@ export function makeCourse(def) {
   } else {
     // Regions are created as the road reaches them (see regions.js). Only the road's
     // own queries create them, in the road's fixed order, so a seed always replays.
-    regions = makeRegions(def.seed, def.y0);
+    regions = makeRegions(def.seed, def.y0, def.director || null);
     regions.extend(0, def.y0);
     styleAt = s => { regions.extend(s, road ? road.planY : def.y0); return regions.style(s); };
     profileAt = regions.profile;
@@ -172,6 +178,14 @@ export function makeCourse(def) {
     railAt, barrierAt, cornersUpTo,
     // Endless grows the road ahead of the rider; stages are pre-built.
     ensure(s) { if (endless) road.ensure(s + 1600); },
+    // Ride to my music, from the rider at s: a new song (returns its region), and a
+    // late change of that region's vibe (false once it's too close to change).
+    musicCut: s => regions.songCut(s + MUSIC_AHEAD, road.planY),
+    musicRedress(reg, s) {
+      if (reg.s0 - s < MUSIC_REDRESS) return false;
+      regions.redress(reg);
+      return true;
+    },
     startS: 24,
   };
 }
