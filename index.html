@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Arcade</title>
+<!-- Inline so there's no favicon.ico request to 404. -->
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><rect width='16' height='16' rx='3' fill='%230d0f16'/><circle cx='8' cy='6' r='3' fill='%235ac8fa'/><rect x='3' y='11' width='10' height='2' rx='1' fill='%23e8eaf0'/></svg>">
+<link rel="stylesheet" href="./styles.css">
+</head>
+<body>
+
+<header class="bar">
+  <h1>ARCADE</h1>
+  <button id="back" class="ghost" hidden>&larr; Games</button>
+</header>
+
+<!-- Game picker -->
+<main id="lobby">
+  <ul id="grid" class="grid"></ul>
+  <p class="hint">Click a game to load it. Nothing downloads until you do.</p>
+</main>
+
+<!-- Play view -->
+<main id="stage" hidden>
+  <div class="hud">
+    <span id="title"></span>
+    <span class="spacer"></span>
+    <span>Score <b id="score">0</b></span>
+    <span>Best <b id="best">0</b></span>
+  </div>
+  <div class="frame">
+    <canvas id="screen" width="800" height="500"></canvas>
+    <div id="overlay" class="overlay">
+      <p id="overlay-text">Click to start</p>
+    </div>
+  </div>
+  <p id="status" class="hint"></p>
+</main>
+
+<script type="module" src="./app.js"></script>
+</body>
+</html>

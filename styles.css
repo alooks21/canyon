@@ -1,0 +1,130 @@
+:root {
+  --bg: #0d0f16;
+  --panel: #161926;
+  --line: #262b3d;
+  --text: #e8eaf0;
+  --dim: #8b93a8;
+  --accent: #5ac8fa;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font: 16px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  padding-bottom: 3rem;
+}
+
+.bar {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  padding: 1rem 16px;
+  border-bottom: 1px solid var(--line);
+}
+
+.bar h1 {
+  margin: 0;
+  font-size: 1.1rem;
+  letter-spacing: 0.35em;
+  color: var(--accent);
+}
+
+main { padding: 1.5rem 16px; max-width: 880px; margin: 0 auto; }
+
+/* ---------- lobby ---------- */
+.grid {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 1rem;
+}
+
+.card {
+  width: 100%;
+  text-align: left;
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  padding: 1.1rem;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+  transition: border-color 0.15s, transform 0.15s;
+}
+
+.card:hover, .card:focus-visible {
+  border-color: var(--accent);
+  transform: translateY(-2px);
+  outline: none;
+}
+
+.card-title { font-size: 1.05rem; color: var(--accent); }
+.card-blurb { color: var(--dim); font-size: 0.85rem; }
+
+/* ---------- play view ---------- */
+.hud {
+  display: flex;
+  gap: 1.25rem;
+  align-items: baseline;
+  margin-bottom: 0.75rem;
+  font-size: 0.85rem;
+  color: var(--dim);
+  flex-wrap: wrap;
+}
+.hud b { color: var(--text); }
+.spacer { flex: 1; }
+
+.frame {
+  position: relative;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  overflow: hidden;
+  background: #12141c;
+}
+
+canvas {
+  display: block;
+  width: 100%;
+  height: auto;       /* scales down on a phone without touching game coordinates */
+}
+
+/* The rule above would otherwise beat the `hidden` attribute's built-in
+   display:none, so a hidden canvas would keep reserving its full height.
+   3D games hide the shared 2D canvas and supply their own. */
+canvas[hidden] { display: none; }
+
+.overlay {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  background: rgba(13, 15, 22, 0.82);
+  cursor: pointer;
+  text-align: center;
+  padding: 1rem;
+}
+.overlay[hidden] { display: none; }
+.overlay p { margin: 0; color: var(--accent); }
+
+.hint { color: var(--dim); font-size: 0.8rem; margin-top: 0.75rem; }
+
+.ghost {
+  margin-left: auto;
+  background: none;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  color: var(--dim);
+  font: inherit;
+  font-size: 0.85rem;
+  padding: 0.35rem 0.8rem;
+  cursor: pointer;
+}
+.ghost:hover { color: var(--text); border-color: var(--accent); }
