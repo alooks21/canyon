@@ -283,10 +283,17 @@ export function stepBike(b, inp, course, opt, dt = STEP) {
   // The rider asks for a lean; at walking pace the bike only lets you lean a little.
   let leanMax = LEAN_MAX;
   if (b.v < 6) leanMax = Math.min(leanMax, (8 + b.v * 5) * DEG);
+  let latMax = Infinity;                                       // lateral budget (lean assist)
   if (aids.leanAssist) {
-    // Never ask for more lean than the grip left over after braking/accelerating.
-    const lat = Math.sqrt(Math.max(0, (0.93 * mu * G) ** 2 - aTyre * aTyre));
+    // Never ask for more lean than the grip left over after braking (brakes + engine
+    // braking). Drive doesn't count: lean wins and ATC trims power to the grip the
+    // lean leaves, like cornering traction control. Counting drive too deadlocked
+    // the two aids — upright on the throttle, ATC gave full drive and lean assist
+    // then allowed no lean, so the bike stayed upright.
+    const aDecel = Math.max(0, -aTyre);
+    const lat = Math.sqrt(Math.max(0, (0.93 * mu * G) ** 2 - aDecel * aDecel));
     leanMax = Math.min(leanMax, Math.atan(lat / G));
+    latMax = lat;
   }
   const frontUp = b.pitch > 2 * DEG ? 0.25 : 1;                // no steering on one wheel
   b.phiCmd = clamp(inp.lean, -1, 1) * leanMax * frontUp + b.phi * (1 - frontUp);
@@ -301,6 +308,9 @@ export function stepBike(b, inp, course, opt, dt = STEP) {
   const psiLean = G * Math.tan(b.phi) / Math.max(b.v, 3);
   const psiBar = b.v * Math.tan(clamp(inp.lean, -1, 1) * 0.5) / L;
   b.psiDot = b.airborne ? 0 : blend * psiLean + (1 - blend) * psiBar;
+  // The handlebar term ignores the lean cap, so below ~7.5 m/s full lock could ask
+  // for more cornering than the tyres have. Lean assist holds v·ψ̇ to the same budget.
+  if (b.v > 0) b.psiDot = clamp(b.psiDot, -latMax / b.v, latMax / b.v);
   b.psi += b.psiDot * dt;
   b.ay = b.v * b.psiDot;
   // Visual steering angle: the geometry of the turn, plus a countersteer flick.
